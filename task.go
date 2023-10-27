@@ -1,4 +1,4 @@
-package taskloop
+package task
 
 import (
 	"errors"
@@ -15,7 +15,7 @@ type ITask interface {
 
 var ErrNoTask = errors.New("ErrNoTask")
 
-type ITaskMgr interface {
+type ITaskSerialize interface {
 	Add(ITask) error
 	Next() (ITask, error)
 	Remove(ID any) error

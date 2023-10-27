@@ -1,4 +1,4 @@
-module github.com/ndsky1003/eventloop
+module github.com/ndsky1003/task
 
 go 1.21.3
 
