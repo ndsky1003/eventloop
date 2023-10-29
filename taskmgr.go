@@ -7,9 +7,12 @@ import (
 
 	"github.com/ndsky1003/logger"
 	"github.com/samber/lo"
+
+	"github.com/ndsky1003/task/itask"
+	"github.com/ndsky1003/task/options"
 )
 
-type HandleTaskFunc func(ITask) error
+type HandleTaskFunc func(itask.ITask) error
 
 type task_mgr_status = uint32
 
@@ -19,22 +22,20 @@ const (
 	task_mgr_status_handle_error                        // 执行出错
 )
 
-const max_concurrence_num = 1000
-
 type handleStatusReq struct {
 	status task_mgr_status
 	meta   any
 }
 
 type task_mgr struct {
-	l                        sync.Mutex
-	status                   uint32
-	handling_asce_task_types []uint32
-	task_serialize           ITaskSerialize
-	_handle_task_fn          HandleTaskFunc
-	done                     chan struct{}
-	concurrenceNum           chan struct{} // 限流
-	err_sleep_deltas         []time.Duration
+	l                         sync.Mutex
+	status                    uint32
+	handling_order_task_types []uint32 // 正在执行的OrderTask的Type
+	task_serialize            itask.ITaskSerialize
+	_handle_task_fn           HandleTaskFunc
+	done                      chan struct{}
+	concurrenceNum            chan struct{} // 限流
+	opt                       *options.MgrOptions
 }
 
 /*
@@ -43,15 +44,7 @@ sleep_deltas:任务处理错误的增量
 task_serialize: 任务的管理，序列化、反序列化、hasnext，next等
 fn:具体任务的处理逻辑
 */
-func NewTaskMgr(concurrenceNum uint32, sleep_deltas []time.Duration, task_serialize ITaskSerialize, fn HandleTaskFunc) *task_mgr {
-	if concurrenceNum > max_concurrence_num {
-		concurrenceNum = max_concurrence_num
-	}
-
-	if len(sleep_deltas) == 0 {
-		panic("sleep_deltas length is 0")
-	}
-
+func NewTaskMgr(task_serialize itask.ITaskSerialize, fn HandleTaskFunc, opts ...*options.MgrOptions) *task_mgr {
 	if task_serialize == nil {
 		panic("task_serialize must not nil")
 	}
@@ -59,11 +52,14 @@ func NewTaskMgr(concurrenceNum uint32, sleep_deltas []time.Duration, task_serial
 	if fn == nil {
 		panic("fn must not nil")
 	}
+	opt := options.Mgr()
+	opt.Merge(opts...)
 
 	c := &task_mgr{
-		concurrenceNum:  make(chan struct{}, concurrenceNum),
+		concurrenceNum:  make(chan struct{}, opt.ConcurrenceNum),
 		task_serialize:  task_serialize,
 		_handle_task_fn: fn,
+		opt:             opt,
 	}
 	if err := task_serialize.Init(); err != nil {
 		panic(err)
@@ -75,24 +71,24 @@ func NewTaskMgr(concurrenceNum uint32, sleep_deltas []time.Duration, task_serial
 func (this *task_mgr) push_handling_asce_task_types(T uint32) {
 	this.l.Lock()
 	defer this.l.Unlock()
-	if !lo.Contains(this.handling_asce_task_types, T) {
-		this.handling_asce_task_types = append(this.handling_asce_task_types, T)
+	if !lo.Contains(this.handling_order_task_types, T) {
+		this.handling_order_task_types = append(this.handling_order_task_types, T)
 	}
 }
 
 func (this *task_mgr) get_handling_asce_task_types() []uint32 {
 	this.l.Lock()
 	defer this.l.Unlock()
-	r := make([]uint32, len(this.handling_asce_task_types))
-	copy(r, this.handling_asce_task_types)
+	r := make([]uint32, len(this.handling_order_task_types))
+	copy(r, this.handling_order_task_types)
 	return r
 }
 
 func (this *task_mgr) pop_handling_asce_task_types(T uint32) {
 	this.l.Lock()
 	defer this.l.Unlock()
-	index := lo.IndexOf(this.handling_asce_task_types, T)
-	this.handling_asce_task_types = lo.Drop(this.handling_asce_task_types, index)
+	index := lo.IndexOf(this.handling_order_task_types, T)
+	this.handling_order_task_types = lo.Drop(this.handling_order_task_types, index)
 }
 
 func (this *task_mgr) Start() {
@@ -109,7 +105,7 @@ func (this *task_mgr) handleStatus(req *handleStatusReq) {
 	switch req.status {
 	case task_mgr_status_start, task_mgr_status_handle_error:
 		if req.status == task_mgr_status_handle_error {
-			if task, ok := req.meta.(ITask); ok {
+			if task, ok := req.meta.(itask.ITask); ok {
 				if err := this.task_serialize.UpdateStatus2Init(task); err != nil {
 					logger.Errf("task:%v,err:%v\n", task, err)
 					break
@@ -143,11 +139,11 @@ func (this *task_mgr) handleStatus(req *handleStatusReq) {
 }
 
 // 添加任务
-func (this *task_mgr) Add(task ITask) error {
+func (this *task_mgr) Add(task itask.ITask) error {
 	return this.add(task)
 }
 
-func (this *task_mgr) add(task ITask) error {
+func (this *task_mgr) add(task itask.ITask) error {
 	now := time.Now()
 	if is_zero_time(task.GetUpdateTime()) {
 		task.SetUpdateTime(now)
@@ -174,14 +170,14 @@ func (this *task_mgr) run_loop(done chan struct{}) {
 		default:
 			if task, err := this.task_serialize.Next(this.get_handling_asce_task_types()...); err == nil {
 				this.concurrenceNum <- struct{}{}
-				if task.GetIsAsce() {
+				if task.IsOrder() {
 					this.push_handling_asce_task_types(task.GetType())
 					go this.handdleTaskByType(task.GetType())
 				} else {
 					go this.handdleTask(task)
 				}
 			} else {
-				if err == ErrNoTask {
+				if err == itask.ErrNoTask {
 					this.Stop()
 				} else {
 					logger.Err(err)
@@ -191,16 +187,18 @@ func (this *task_mgr) run_loop(done chan struct{}) {
 	}
 }
 
-func (this *task_mgr) handdleTask(task ITask) {
+func (this *task_mgr) handdleTask(task itask.ITask) {
 	defer func() {
 		<-this.concurrenceNum
 	}()
 	err := this._handle_task_fn(task)
 	if err != nil {
 		logger.Err("handdleTask:", err)
-		this.handleStatus(&handleStatusReq{
-			status: task_mgr_status_handle_error,
-			meta:   task,
+		time.AfterFunc(this.opt.NormalTaskHandleDelta, func() {
+			this.handleStatus(&handleStatusReq{
+				status: task_mgr_status_handle_error,
+				meta:   task,
+			})
 		})
 	} else { // 处理成功，删除任务
 		if err1 := this.task_serialize.Remove(task); err1 != nil {
@@ -210,9 +208,9 @@ func (this *task_mgr) handdleTask(task ITask) {
 }
 
 func (this *task_mgr) sleep(index uint8) uint8 {
-	loopLength := len(this.err_sleep_deltas)
+	loopLength := len(this.opt.OrderTaskHandleDelta)
 	sv := int(index) % loopLength
-	time.Sleep(this.err_sleep_deltas[sv])
+	time.Sleep(this.opt.OrderTaskHandleDelta[sv])
 	index++
 	return index
 }
