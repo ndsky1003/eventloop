@@ -73,15 +73,18 @@ func (this *mongo_serialize[T]) Next(exclude_t ...uint32) (itask.ITask, error) {
 		Collection(this.coll).
 		FindOneAndUpdate(context.Background(),
 			filter,
-			bson.M{"$set": bson.M{"UpdateTime": time.Now()}},
+			bson.M{"$set": bson.M{"UpdateTime": time.Now(), "Status": taskstatus.Handling}},
 			options.FindOneAndUpdate().SetSort(bson.M{"UpdateTime": 1}),
 		)
 
 	var doc T
-	if err := r.Decode(doc); err != nil {
+	if err := r.Decode(&doc); err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, itask.ErrNoTask
+		}
 		return nil, err
 	}
-	var d any = doc
+	var d any = &doc
 	if v, ok := d.(itask.ITask); ok {
 		return v, nil
 	} else {
@@ -97,16 +100,20 @@ func (this *mongo_serialize[T]) NextByType(t uint32) (itask.ITask, error) {
 	r := this.client.
 		Database(this.database).
 		Collection(this.coll).
-		FindOne(context.Background(),
+		FindOneAndUpdate(context.Background(),
 			filter,
-			options.FindOne().SetSort(bson.M{"CreateTime": 1}),
+			bson.M{"$set": bson.M{"UpdateTime": time.Now(), "Status": taskstatus.Handling}},
+			options.FindOneAndUpdate().SetSort(bson.M{"CreateTime": 1}),
 		)
 
 	var doc T
-	if err := r.Decode(doc); err != nil {
+	if err := r.Decode(&doc); err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, itask.ErrNoTask
+		}
 		return nil, err
 	}
-	var d any = doc
+	var d any = &doc
 	if v, ok := d.(itask.ITask); ok {
 		return v, nil
 	} else {
@@ -137,7 +144,7 @@ func (this *mongo_serialize[T]) Remove(t itask.ITask) error {
 	_, err := this.client.
 		Database(this.database).
 		Collection(this.coll).
-		DeleteOne(context.Background(), t.GetID())
+		DeleteOne(context.Background(), bson.M{"_id": t.GetID()})
 	return err
 }
 

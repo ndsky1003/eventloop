@@ -35,13 +35,14 @@ func (this *Task) SetCreateTime(a time.Time) {
 	this.CreateTime = a
 }
 
-func (this *Task) GetType() any {
+func (this *Task) GetType() uint32 {
 	return this.Type
 }
 
-func (this *Task) IsOrder() any {
+func (this *Task) IsOrder() bool {
 	return this.Order
 }
+
 */
 
 type ITask interface {
