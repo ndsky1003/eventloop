@@ -69,7 +69,7 @@ func NewTaskMgr(task_serialize itask.ITaskSerialize, fn HandleTaskFunc, opts ...
 	return c
 }
 
-func (this *TaskMgr) push_handling_asce_task_types(T uint32) {
+func (this *TaskMgr) push_handling_order_task_types(T uint32) {
 	this.l.Lock()
 	defer this.l.Unlock()
 	if !lo.Contains(this.handling_order_task_types, T) {
@@ -77,7 +77,7 @@ func (this *TaskMgr) push_handling_asce_task_types(T uint32) {
 	}
 }
 
-func (this *TaskMgr) get_handling_asce_task_types() []uint32 {
+func (this *TaskMgr) get_handling_order_task_types() []uint32 {
 	this.l.Lock()
 	defer this.l.Unlock()
 	r := make([]uint32, len(this.handling_order_task_types))
@@ -85,11 +85,12 @@ func (this *TaskMgr) get_handling_asce_task_types() []uint32 {
 	return r
 }
 
-func (this *TaskMgr) pop_handling_asce_task_types(T uint32) {
+func (this *TaskMgr) pop_handling_order_task_types(T uint32) {
 	this.l.Lock()
 	defer this.l.Unlock()
-	index := lo.IndexOf(this.handling_order_task_types, T)
-	this.handling_order_task_types = lo.Drop(this.handling_order_task_types, index)
+	if index := lo.IndexOf(this.handling_order_task_types, T); index != -1 {
+		this.handling_order_task_types = append(this.handling_order_task_types[:index], this.handling_order_task_types[index+1:]...)
+	}
 }
 
 func (this *TaskMgr) Start() {
@@ -169,10 +170,10 @@ func (this *TaskMgr) run_loop(done chan struct{}) {
 		case <-done:
 			return
 		default:
-			if task, err := this.task_serialize.Next(this.get_handling_asce_task_types()...); err == nil {
+			if task, err := this.task_serialize.Next(this.get_handling_order_task_types()...); err == nil {
 				this.concurrenceNum <- struct{}{}
 				if task.IsOrder() {
-					this.push_handling_asce_task_types(task.GetType())
+					this.push_handling_order_task_types(task.GetType())
 					go this.handdleTaskByType(task)
 				} else {
 					go this.handdleTask(task)
@@ -224,7 +225,9 @@ func (this *TaskMgr) handdleTaskByType(task itask.ITask) {
 	defer func() {
 		if !isPanic {
 			// 防止下次再次进入
-			this.pop_handling_asce_task_types(t)
+			this.pop_handling_order_task_types(t)
+		} else {
+			logger.Infof("task type:%v not handle", t)
 		}
 		fmt.Println("defer handdleTaskByType")
 		<-this.concurrenceNum
