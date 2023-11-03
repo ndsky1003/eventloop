@@ -1,7 +1,6 @@
 package task
 
 import (
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -210,9 +209,10 @@ func (this *TaskMgr) handdleTask(task itask.ITask) {
 
 func (this *TaskMgr) sleep(index uint8) uint8 {
 	loopLength := len(this.opt.OrderTaskHandleDelta)
-	sv := int(index) % loopLength
-	fmt.Println("sleep:", this.opt.OrderTaskHandleDelta[sv])
-	time.Sleep(this.opt.OrderTaskHandleDelta[sv])
+	si := int(index) % loopLength
+	sv := this.opt.OrderTaskHandleDelta[si]
+	// logger.Info("sleep:", sv)
+	time.Sleep(sv)
 	index++
 	return index
 }
@@ -220,7 +220,7 @@ func (this *TaskMgr) sleep(index uint8) uint8 {
 // 某些任务按照添加顺序执行
 func (this *TaskMgr) handdleTaskByType(task itask.ITask) {
 	t := task.GetType()
-	fmt.Println("handdleTaskByType:", t)
+	logger.Info("handdleTaskByType:", t)
 	var isPanic bool
 	defer func() {
 		if !isPanic {
@@ -229,7 +229,7 @@ func (this *TaskMgr) handdleTaskByType(task itask.ITask) {
 		} else {
 			logger.Infof("task type:%v not handle", t)
 		}
-		fmt.Println("defer handdleTaskByType")
+		logger.Info("defer handdleTaskByType")
 		<-this.concurrenceNum
 	}()
 	if isPanic = this._handdleTaskByType(task); isPanic {
