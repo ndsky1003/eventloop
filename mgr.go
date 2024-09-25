@@ -5,37 +5,28 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ndsky1003/logger"
 	"github.com/samber/lo"
 
 	"github.com/ndsky1003/task/itask"
+	"github.com/ndsky1003/task/operator"
 	"github.com/ndsky1003/task/options"
-)
-
-type HandleTaskFunc func(itask.ITask) error
-
-type task_mgr_status = uint32
-
-const (
-	task_mgr_status_stop         task_mgr_status = iota // 初始化
-	task_mgr_status_start                               // 启动
-	task_mgr_status_handle_error                        // 执行出错
+	"github.com/ndsky1003/task/taskmgrstatus"
 )
 
 type handleStatusReq struct {
-	status task_mgr_status
+	status taskmgrstatus.T
 	meta   any
 }
 
-type TaskMgr struct {
+type task_mgr struct {
 	l                         sync.Mutex
 	status                    uint32
 	handling_order_task_types []uint32 // 正在执行的OrderTask的Type
 	task_serialize            itask.ITaskSerialize
-	_handle_task_fn           HandleTaskFunc
+	_handle_task_operator     operator.IOperator
 	done                      chan struct{}
 	concurrenceNum            chan struct{} // 限流
-	opt                       *options.MgrOptions
+	opt                       *options.Option
 }
 
 /*
@@ -44,22 +35,21 @@ sleep_deltas:任务处理错误的增量
 task_serialize: 任务的管理，序列化、反序列化、hasnext，next等
 fn:具体任务的处理逻辑
 */
-func NewTaskMgr(task_serialize itask.ITaskSerialize, fn HandleTaskFunc, opts ...*options.MgrOptions) *TaskMgr {
+func NewTaskMgr(task_serialize itask.ITaskSerialize, op operator.IOperator, opts ...*options.Option) *task_mgr {
 	if task_serialize == nil {
 		panic("task_serialize must not nil")
 	}
 
-	if fn == nil {
-		panic("fn must not nil")
+	if op == nil {
+		panic("op must not nil")
 	}
-	opt := options.Mgr()
-	opt.Merge(opts...)
+	opt := options.New().Merge(opts...)
 
-	c := &TaskMgr{
-		concurrenceNum:  make(chan struct{}, opt.ConcurrenceNum),
-		task_serialize:  task_serialize,
-		_handle_task_fn: fn,
-		opt:             opt,
+	c := &task_mgr{
+		concurrenceNum:        make(chan struct{}, opt.ConcurrenceNum),
+		task_serialize:        task_serialize,
+		_handle_task_operator: op,
+		opt:                   opt,
 	}
 	if err := task_serialize.Init(); err != nil {
 		panic(err)
@@ -68,7 +58,7 @@ func NewTaskMgr(task_serialize itask.ITaskSerialize, fn HandleTaskFunc, opts ...
 	return c
 }
 
-func (this *TaskMgr) push_handling_order_task_types(T uint32) {
+func (this *task_mgr) push_handling_order_task_types(T uint32) {
 	this.l.Lock()
 	defer this.l.Unlock()
 	if !lo.Contains(this.handling_order_task_types, T) {
@@ -76,7 +66,7 @@ func (this *TaskMgr) push_handling_order_task_types(T uint32) {
 	}
 }
 
-func (this *TaskMgr) get_handling_order_task_types() []uint32 {
+func (this *task_mgr) get_handling_order_task_types() []uint32 {
 	this.l.Lock()
 	defer this.l.Unlock()
 	r := make([]uint32, len(this.handling_order_task_types))
@@ -84,7 +74,7 @@ func (this *TaskMgr) get_handling_order_task_types() []uint32 {
 	return r
 }
 
-func (this *TaskMgr) pop_handling_order_task_types(T uint32) {
+func (this *task_mgr) pop_handling_order_task_types(T uint32) {
 	this.l.Lock()
 	defer this.l.Unlock()
 	if index := lo.IndexOf(this.handling_order_task_types, T); index != -1 {
@@ -92,20 +82,20 @@ func (this *TaskMgr) pop_handling_order_task_types(T uint32) {
 	}
 }
 
-func (this *TaskMgr) Start() {
-	this.handleStatus(&handleStatusReq{status: task_mgr_status_start})
+func (this *task_mgr) Start() {
+	this.handleStatus(&handleStatusReq{status: taskmgrstatus.Start})
 }
 
-func (this *TaskMgr) Stop() {
-	this.handleStatus(&handleStatusReq{status: task_mgr_status_stop})
+func (this *task_mgr) Stop() {
+	this.handleStatus(&handleStatusReq{status: taskmgrstatus.Stop})
 }
 
-func (this *TaskMgr) handleStatus(req *handleStatusReq) {
+func (this *task_mgr) handleStatus(req *handleStatusReq) {
 	this.l.Lock()
 	defer this.l.Unlock()
 	switch req.status {
-	case task_mgr_status_start, task_mgr_status_handle_error:
-		if req.status == task_mgr_status_handle_error {
+	case taskmgrstatus.Start, taskmgrstatus.HandleError:
+		if req.status == taskmgrstatus.HandleError {
 			if task, ok := req.meta.(itask.ITask); ok {
 				if err := this.task_serialize.UpdateStatus2Init(task); err != nil {
 					logger.Errf("task:%v,err:%v\n", task, err)
@@ -113,7 +103,7 @@ func (this *TaskMgr) handleStatus(req *handleStatusReq) {
 				}
 			}
 		}
-		if !atomic.CompareAndSwapUint32(&this.status, task_mgr_status_stop, task_mgr_status_start) {
+		if !atomic.CompareAndSwapUint32(&this.status, taskmgrstatus.Stop, taskmgrstatus.Start) {
 			logger.Info("Loop has run")
 		} else {
 			if this.done != nil {
@@ -123,11 +113,11 @@ func (this *TaskMgr) handleStatus(req *handleStatusReq) {
 			this.done = make(chan struct{}, 1)
 			go this.run_loop(this.done)
 		}
-	case task_mgr_status_stop:
+	case taskmgrstatus.Stop:
 		if b, err := this.task_serialize.HasNext(this.handling_order_task_types...); err != nil {
 			logger.Err(err)
 		} else if !b {
-			if !atomic.CompareAndSwapUint32(&this.status, task_mgr_status_start, task_mgr_status_stop) {
+			if !atomic.CompareAndSwapUint32(&this.status, taskmgrstatus.Start, taskmgrstatus.Stop) {
 				logger.Info("Loop has stop")
 			} else {
 				if this.done != nil {
@@ -140,11 +130,11 @@ func (this *TaskMgr) handleStatus(req *handleStatusReq) {
 }
 
 // 添加任务
-func (this *TaskMgr) Add(task itask.ITask) error {
+func (this *task_mgr) Add(task itask.ITask) error {
 	return this.add(task)
 }
 
-func (this *TaskMgr) add(task itask.ITask) error {
+func (this *task_mgr) add(task itask.ITask) error {
 	now := time.Now()
 	if is_zero_time(task.GetUpdateTime()) {
 		task.SetUpdateTime(now)
@@ -159,7 +149,7 @@ func (this *TaskMgr) add(task itask.ITask) error {
 	return err
 }
 
-func (this *TaskMgr) run_loop(done chan struct{}) {
+func (this *task_mgr) run_loop(done chan struct{}) {
 	logger.Info("start runloop")
 	defer func() {
 		logger.Info("runloop done")
@@ -178,7 +168,7 @@ func (this *TaskMgr) run_loop(done chan struct{}) {
 					go this.handdleTask(task)
 				}
 			} else {
-				if err == itask.ErrNoTask {
+				if err == err.ErrNoTask {
 					this.Stop()
 				} else {
 					logger.Err(err)
@@ -188,15 +178,15 @@ func (this *TaskMgr) run_loop(done chan struct{}) {
 	}
 }
 
-func (this *TaskMgr) handdleTask(task itask.ITask) {
+func (this *task_mgr) handdleTask(task itask.ITask) {
 	defer func() {
 		<-this.concurrenceNum
 	}()
-	err := this._handle_task_fn(task)
+	err := this._handle_task_operator.HandleTask(task)
 	if err != nil {
 		time.AfterFunc(this.opt.NormalTaskHandleDelta, func() {
 			this.handleStatus(&handleStatusReq{
-				status: task_mgr_status_handle_error,
+				status: taskmgrstatus.HandleError,
 				meta:   task,
 			})
 		})
@@ -207,7 +197,7 @@ func (this *TaskMgr) handdleTask(task itask.ITask) {
 	}
 }
 
-func (this *TaskMgr) sleep(index uint8) uint8 {
+func (this *task_mgr) sleep(index uint8) uint8 {
 	loopLength := len(this.opt.OrderTaskHandleDelta)
 	si := int(index) % loopLength
 	sv := this.opt.OrderTaskHandleDelta[si]
@@ -218,7 +208,7 @@ func (this *TaskMgr) sleep(index uint8) uint8 {
 }
 
 // 某些任务按照添加顺序执行
-func (this *TaskMgr) handdleTaskByType(task itask.ITask) {
+func (this *task_mgr) handdleTaskByType(task itask.ITask) {
 	t := task.GetType()
 	logger.Info("handdleTaskByType:", t)
 	var isPanic bool
@@ -252,10 +242,10 @@ here:
 	}
 }
 
-func (this *TaskMgr) _handdleTaskByType(task itask.ITask) (isPanic bool) {
+func (this *task_mgr) _handdleTaskByType(task itask.ITask) (isPanic bool) {
 	var index uint8
 here:
-	err := this._handle_task_fn(task)
+	err := this._handle_task_operator.HandleTask(task)
 	if err != nil {
 		index = this.sleep(index)
 		if index == 255 {
