@@ -80,7 +80,7 @@ func (this *mongo_serialize[T]) Next(exclude_t ...uint32) (itask.ITask, error) {
 	var doc T
 	if err := r.Decode(&doc); err != nil {
 		if err == mongo.ErrNoDocuments {
-			return nil, err.ErrNoTask
+			return nil, itask.ErrNoTask
 		}
 		return nil, err
 	}

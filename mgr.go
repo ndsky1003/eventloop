@@ -10,6 +10,7 @@ import (
 	"github.com/ndsky1003/task/itask"
 	"github.com/ndsky1003/task/operator"
 	"github.com/ndsky1003/task/options"
+	"github.com/ndsky1003/task/serialize"
 	"github.com/ndsky1003/task/taskmgrstatus"
 )
 
@@ -22,7 +23,7 @@ type task_mgr struct {
 	l                         sync.Mutex
 	status                    uint32
 	handling_order_task_types []uint32 // 正在执行的OrderTask的Type
-	task_serialize            itask.ITaskSerialize
+	task_serialize            serialize.ITaskSerialize
 	_handle_task_operator     operator.IOperator
 	done                      chan struct{}
 	concurrenceNum            chan struct{} // 限流
@@ -35,7 +36,7 @@ sleep_deltas:任务处理错误的增量
 task_serialize: 任务的管理，序列化、反序列化、hasnext，next等
 fn:具体任务的处理逻辑
 */
-func NewTaskMgr(task_serialize itask.ITaskSerialize, op operator.IOperator, opts ...*options.Option) *task_mgr {
+func NewTaskMgr(task_serialize serialize.ITaskSerialize, op operator.IOperator, opts ...*options.Option) *task_mgr {
 	if task_serialize == nil {
 		panic("task_serialize must not nil")
 	}
@@ -90,6 +91,7 @@ func (this *task_mgr) Stop() {
 	this.handleStatus(&handleStatusReq{status: taskmgrstatus.Stop})
 }
 
+// 之所以加锁,是因为并发调用,关闭不应该关闭的done,那么每次给done加上一个指纹,关闭的时候必须凭借指纹关闭
 func (this *task_mgr) handleStatus(req *handleStatusReq) {
 	this.l.Lock()
 	defer this.l.Unlock()
@@ -168,7 +170,7 @@ func (this *task_mgr) run_loop(done chan struct{}) {
 					go this.handdleTask(task)
 				}
 			} else {
-				if err == err.ErrNoTask {
+				if err == itask.ErrNoTask {
 					this.Stop()
 				} else {
 					logger.Err(err)

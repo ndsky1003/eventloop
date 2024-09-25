@@ -1,6 +1,7 @@
 package itask
 
 import (
+	"errors"
 	"time"
 )
 
@@ -53,3 +54,5 @@ type ITask interface {
 	GetType() uint32 // 标识任务类型，某一类的任务，需要按照添加顺序执行,比如充值任务
 	IsOrder() bool   // 有序
 }
+
+var ErrNoTask = errors.New("ErrNoTask")
